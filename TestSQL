@@ -1,0 +1,120 @@
+-- создаю таблицу POSTGRESQL
+
+CREATE TABLE vk_posts (
+    date_post TIMESTAMP,
+    likes INT
+);
+
+/* (в psql)
+\COPY vk_posts (id, date_post, likes)
+FROM 'путь к файлу'
+DELIMITER ','  -- разделитель запятая
+CSV HEADER;    -- строка с заголовками
+*/
+
+-- очистка от выбросов
+WITH filtered_data AS (
+		SELECT * 
+		FROM vk_posts
+		WHERE likes BETWEEN 
+		(SELECT AVG(likes) - 3 * STDDEV(likes) FROM vk_posts) -- нижняя граница
+    	AND 
+		(SELECT AVG(likes) + 3 * STDDEV(likes) FROM vk_posts) -- верхняя граница
+)
+
+-- рaсчет среднего кол-ва лайков по времени суток
+SELECT 
+  CASE 
+    WHEN EXTRACT(HOUR FROM date_post) BETWEEN 6 AND 11 THEN 'Утро'
+    WHEN EXTRACT(HOUR FROM date_post) BETWEEN 12 AND 17 THEN 'День'
+    WHEN EXTRACT(HOUR FROM date_post) BETWEEN 18 AND 23 THEN 'Вечер'
+    ELSE 'Ночь'
+  END AS time_of_day,
+  ROUND(AVG(likes), 0) AS likes_per_day_part
+FROM (SELECT * FROM filtered_data) AS filtered_posts
+GROUP BY time_of_day
+ORDER BY likes_per_day_part DESC;
+-- утро - 12, вечер - 11, ночь - 11, день - 7. День показывает худший результат
+
+-- расчет среднего кол-ва лайков по дню недели
+SELECT 
+  EXTRACT(DOW FROM date_post) AS day_of_week,
+  ROUND(AVG(likes), 0) AS likes_per_dow
+FROM vk_posts
+WHERE likes BETWEEN 
+	(SELECT AVG(likes) - 3 * STDDEV(likes) FROM vk_posts) -- нижняя граница
+    	AND 
+	(SELECT AVG(likes) + 3 * STDDEV(likes) FROM vk_posts) -- верхняя граница
+GROUP BY day_of_week
+ORDER BY likes_per_dow DESC;
+-- четверг - 8, пн, вт, ср, пт, сб - 9, воскресенье - 12 (лучший результат)
+
+-- рассчитываю промежуток между постами и среднее кол-во лайков по промежуткам
+SELECT ROUND((EXTRACT(EPOCH FROM date_diff_query.date_difference) / 3600) / 24, 0) AS rounded_diff_days, -- перевожу в дни
+ROUND(AVG(likes), 0) AS avg_likes, count(date_post)
+FROM 
+	(SELECT date_post, date_post - LAG(date_post) OVER (ORDER BY date_post) AS date_difference, 
+	likes        
+	FROM vk_posts
+	WHERE likes BETWEEN 
+	(SELECT AVG(likes) - 3 * STDDEV(likes) FROM vk_posts)
+    AND 
+	(SELECT AVG(likes) + 3 * STDDEV(likes) FROM vk_posts)
+) AS date_diff_query
+GROUP BY rounded_diff_days
+ORDER BY avg_likes DESC, rounded_diff_days;
+
+-- группирую по 3 факторам
+WITH filtered_data AS (
+    SELECT *,
+        EXTRACT(HOUR FROM date_post) AS post_hour,
+        EXTRACT(DOW FROM date_post) AS post_day_of_week,
+        ROUND((EXTRACT(EPOCH FROM (date_post - LAG(date_post) OVER (ORDER BY date_post)))/3600)/24, 0) AS post_interval -- расчет промежутка между постами в днях
+    FROM vk_posts
+    WHERE likes BETWEEN 
+        (SELECT AVG(likes) - 3 * STDDEV(likes) FROM vk_posts) -- нижняя граница
+        AND 
+        (SELECT AVG(likes) + 3 * STDDEV(likes) FROM vk_posts) -- верхняя граница
+),
+
+filtered_posts AS (SELECT 
+    CASE 
+        WHEN post_hour BETWEEN 6 AND 11 THEN 'Утро'
+        WHEN post_hour BETWEEN 12 AND 17 THEN 'День'
+        WHEN post_hour BETWEEN 18 AND 23 THEN 'Вечер'
+        ELSE 'Ночь'
+    END AS time_of_day,
+    post_day_of_week,
+    post_interval,
+    ROUND(AVG(likes), 0) AS avg_likes,
+	COUNT(date_post) AS post_amount
+    FROM filtered_data
+GROUP BY time_of_day, post_day_of_week, post_interval),
+
+-- кодирую время суток для последующего вычисления зависимости 
+encoded_posts AS (
+    SELECT *,
+        CASE 
+            WHEN time_of_day = 'Утро' THEN 1
+            WHEN time_of_day = 'День' THEN 2
+            WHEN time_of_day = 'Вечер' THEN 3
+            WHEN time_of_day = 'Ночь' THEN 4
+        END AS time_of_day_encoded
+    FROM filtered_posts
+)
+
+-- вычисляю зависимости кол-ва лайков от разных свойств
+SELECT 
+ROUND(CORR(avg_likes, post_day_of_week)::DECIMAL, 2) AS dow_likes_correlation,
+ROUND(CORR(avg_likes, time_of_day_encoded)::DECIMAL, 2) AS part_of_day_correlation,
+ROUND(CORR(avg_likes, post_interval)::DECIMAL, 2) AS interval_correlation
+FROM encoded_posts;
+
+/*
+получаем значения корреляции: 
+день недели - -0.05, время суток - 0,00, промежуток - -0.26
+Значение -0.2571 означает, что чем больше промежуток между постами, тем меньше количество лайков
+получают посты, более активные публикации получают больше лайков. Таким образом, 
+
+наибольшее влияние оказывает интервал между публикациями
+*/
