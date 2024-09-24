@@ -5,7 +5,7 @@ import datetime
 # использую VK API для создания таблицы, нужно ввести токен
 access_token = 'Ваш токен'
 api_version = '5.131'
-owner_id = 'katrinackles' # Вк-страница друга
+owner_id = 'id или короткое имя' # Вк-страница друга
 count = 100  # количество постов за один запрос
 url = 'https://api.vk.com/method/wall.get'
 
